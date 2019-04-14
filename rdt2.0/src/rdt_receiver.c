@@ -18,7 +18,7 @@
 #include "common.h"
 #include "packet.h"
 
-
+#define WINDOW_SIZE 10
 /*
  * You are required to change the implementation to support
  * window size greater than one.
@@ -88,6 +88,16 @@ int main(int argc, char **argv) {
      * main loop: wait for a datagram, then echo it
      */
     VLOG(DEBUG, "epoch time, bytes received, sequence number");
+    //creating an empty array and filling it with empty packets
+    //as packets come in we will fill this array up with them
+    //and use it as a window.
+    tcp_packet *pile[WINDOW_SIZE];
+    for(int i=0;i<WINDOW_SIZE;i++){
+        pile[i] = make_packet(MSS_SIZE);
+        pile[i]-> hdr.seqno = -1;
+        pile[i]-> hdr.data_size = 0;
+    }
+    int next = 0; //the next sequence number that we are expecting
 
     clientlen = sizeof(clientaddr);
     while (1) {
@@ -106,16 +116,70 @@ int main(int argc, char **argv) {
             fclose(fp);
             break;
         }
-        /* 
-         * sendto: ACK back to the client 
-         */
-        gettimeofday(&tp, NULL);
-        VLOG(DEBUG, "%lu, %d, %d", tp.tv_sec, recvpkt->hdr.data_size, recvpkt->hdr.seqno);
+        //If we receive the packet we are waiting for
+        if (next == recvpkt->hdr.seqno){
+            /* 
+            * sendto: ACK back to the client 
+            */
+            
+            gettimeofday(&tp, NULL);
+            VLOG(DEBUG, "%lu, %d, %d", tp.tv_sec, recvpkt->hdr.data_size, recvpkt->hdr.seqno);
 
-        fseek(fp, recvpkt->hdr.seqno, SEEK_SET);
-        fwrite(recvpkt->data, 1, recvpkt->hdr.data_size, fp);
+            fseek(fp, recvpkt->hdr.seqno, SEEK_SET);
+            fwrite(recvpkt->data, 1, recvpkt->hdr.data_size, fp);
+            next = recvpkt->hdr.seqno + recvpkt->hdr.data_size;
+            //sorting the packets stored by seqno
+            for (int i=0; i<WINDOW_SIZE;i++){
+                if (pile[i]->hdr.seqno==-1) break;
+                for(int j=i;j<WINDOW_SIZE;i++){
+                    if (pile[j]->hdr.seqno==-1) break;
+                    
+                    if (pile[j]->hdr.seqno < pile[i]->hdr.seqno){
+                        tcp_packet* temp = pile[j];
+                        pile[j] = pile[i];
+                        pile[i] = temp;
+                    }
+                }
+            }
+            for (int i = 0; i<WINDOW_SIZE; i++){
+                if (pile[i]->hdr.seqno==next){
+                    //update next
+                    next = pile[i]->hdr.seqno + pile[i]->hdr.data_size;
+                    //write to file
+                    fseek(fp, pile[i]->hdr.seqno, SEEK_SET);
+                    fwrite(pile[i]->data, 1, pile[i]->hdr.data_size, fp);
+                }
+                pile[i]->hdr.seqno = -1;
+                pile[i]->hdr.data_size = 0;
+                if (pile[i]->hdr.seqno != next) break;
+            }
+        
+        }
+        //if it's not the packet we are expecting
+        else if (next < recvpkt->hdr.seqno){
+            int dup =0;
+            for (int i = 0; i < WINDOW_SIZE; i++){
+                if (pile[i]->hdr.seqno==-1){
+                    break;
+                }
+                if (pile[i]->hdr.seqno==recvpkt->hdr.seqno){
+                    dup=1;
+                    break;
+                }
+            }
+            if (!dup){
+                //add the pckt to the buffer
+                for (int i=0;i<WINDOW_SIZE;i++){
+                    if (pile[i]->hdr.seqno==-1){
+                        //just in case
+                        memset(pile[i], 0, MSS_SIZE);
+                        memcpy(pile[i], recvpkt, MSS_SIZE);
+                    }
+                }
+            }
+        }
         sndpkt = make_packet(0);
-        sndpkt->hdr.ackno = recvpkt->hdr.seqno + recvpkt->hdr.data_size;
+        sndpkt->hdr.ackno = next;
         sndpkt->hdr.ctr_flags = ACK;
         if (sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, 
                 (struct sockaddr *) &clientaddr, clientlen) < 0) {
