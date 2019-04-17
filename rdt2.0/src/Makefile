@@ -10,11 +10,11 @@ CC = gcc -c
 SHELL = /bin/bash
 
 # compiling flags here
-CFLAGS = -Wall -I.
+CFLAGS = -Wall -I. -g
 
 LINKER = gcc -o
 # linking flags here
-LFLAGS   = -Wall
+LFLAGS   = -Wall -g
 
 OBJDIR = ../obj
 
@@ -32,7 +32,7 @@ TARGET:	$(OBJDIR) $(CLIENT)	$(SERVER)
 
 
 $(CLIENT):	$(CLIENT_OBJECTS)
-	$(LINKER)  $@  $(CLIENT_OBJECTS)
+	$(LINKER)  $@  $(CLIENT_OBJECTS) -lm
 	@echo "Link complete!"
 
 $(SERVER): $(SERVER_OBJECTS)

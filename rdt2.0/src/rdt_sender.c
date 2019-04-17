@@ -15,16 +15,17 @@
 #include <sys/time.h>
 #include <time.h>
 #include <assert.h>
+#include <math.h>
 
 #include"packet.h"
 #include"common.h"
 
 #define STDIN_FD    0
 #define RETRY  120 //millisecond 
-
+#define WINDOW_SIZE 10
 int next_seqno=0;
 int send_base=0;
-int window_size = 1;
+//int window_size = 1;
 
 int sockfd, serverlen;
 struct sockaddr_in serveraddr;
@@ -32,7 +33,15 @@ struct itimerval timer;
 tcp_packet *sndpkt;
 tcp_packet *recvpkt;
 sigset_t sigmask;       
+tcp_packet *send_window[WINDOW_SIZE];
 
+
+int modincr(int a){
+    if (a+1==WINDOW_SIZE){
+        return 0;
+    }
+    else return a+1;
+}
 
 void resend_packets(int sig)
 {
@@ -124,25 +133,38 @@ int main (int argc, char **argv)
     assert(MSS_SIZE - TCP_HDR_SIZE > 0);
 
     //Stop and wait protocol
-
+    int base_index=0;
     init_timer(RETRY, resend_packets);
     next_seqno = 0;
+    int start = 0;
+    int khalas = 0;
+    int segger = 0;
     while (1)
     {
-        len = fread(buffer, 1, DATA_SIZE, fp);
-        if ( len <= 0)
-        {
-            VLOG(INFO, "End Of File has been reached");
-            sndpkt = make_packet(0);
-            sendto(sockfd, sndpkt, TCP_HDR_SIZE,  0,
-                    (const struct sockaddr *)&serveraddr, serverlen);
-            break;
-        }
-        send_base = next_seqno;
-        next_seqno = send_base + len;
-        sndpkt = make_packet(len);
-        memcpy(sndpkt->data, buffer, len);
-        sndpkt->hdr.seqno = send_base;
+        
+        sleep(0.1);
+        do{
+            len = fread(buffer, 1, DATA_SIZE, fp);
+            if ( len <= 0 || khalas)
+            {
+                khalas=1;
+                VLOG(INFO, "End Of File has been reached");
+                sndpkt = make_packet(0);
+                sndpkt ->hdr.data_size = 0;
+                sndpkt ->hdr.seqno = -1;
+                send_window[start] = sndpkt;
+                break;
+            }
+            send_base = next_seqno;
+            next_seqno = send_base + len;
+            sndpkt = make_packet(len);
+            memcpy(sndpkt->data, buffer, len);
+            sndpkt->hdr.seqno = send_base;
+            send_base+=len;
+            send_window[start] = (tcp_packet*) sndpkt;
+            start++;
+            start%=(WINDOW_SIZE);
+        } while (start != base_index);
         //Wait for ACK
         do {
 
@@ -153,12 +175,17 @@ int main (int argc, char **argv)
              * will assign a random port number so that server can send its
              * response to the src port.
              */
-            if(sendto(sockfd, sndpkt, TCP_HDR_SIZE + get_data_size(sndpkt), 0, 
-                        ( const struct sockaddr *)&serveraddr, serverlen) < 0)
-            {
-                error("sendto");
-            }
+            int i = base_index;
+            do {
 
+                if(sendto(sockfd, send_window[i], TCP_HDR_SIZE + get_data_size(send_window[i]), 0, 
+                            ( const struct sockaddr *)&serveraddr, serverlen) < 0)
+                {
+                    error("sendto");
+                }
+                i++;
+                i=i%(WINDOW_SIZE);
+            } while(i!=base_index);
             start_timer();
             //ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
             //struct sockaddr *src_addr, socklen_t *addrlen);
@@ -174,9 +201,9 @@ int main (int argc, char **argv)
             assert(get_data_size(recvpkt) <= DATA_SIZE);
             stop_timer();
             /*resend pack if don't recv ack */
-        } while(recvpkt->hdr.ackno != next_seqno);
-
-        free(sndpkt);
+        } while(recvpkt->hdr.ackno <= send_window[base_index]->hdr.seqno);
+        start = base_index;
+        while(send_window[base_index]->hdr.seqno != recvpkt->hdr.ackno) {base_index = modincr(base_index); if (start==base_index) return 0;}
     }
 
     return 0;

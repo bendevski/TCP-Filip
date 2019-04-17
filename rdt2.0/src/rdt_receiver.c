@@ -14,7 +14,7 @@
 #include <arpa/inet.h>
 #include <sys/time.h>
 #include <assert.h>
-
+#include <math.h>
 #include "common.h"
 #include "packet.h"
 
@@ -114,24 +114,35 @@ int main(int argc, char **argv) {
         if ( recvpkt->hdr.data_size == 0) {
             //VLOG(INFO, "End Of File has been reached");
             fclose(fp);
+            sndpkt = make_packet(0);
+            sndpkt->hdr.ackno = -1;
+            sndpkt->hdr.ctr_flags = ACK;
+            if (sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, 
+                    (struct sockaddr *) &clientaddr, clientlen) < 0) {
+                error("ERROR in sendto");
+            }
             break;
         }
+        VLOG(DEBUG, "%d", next);
+        VLOG(DEBUG, "%d", recvpkt->hdr.seqno);
+        
         //If we receive the packet we are waiting for
         if (next == recvpkt->hdr.seqno){
             /* 
             * sendto: ACK back to the client 
             */
             
+            
             gettimeofday(&tp, NULL);
             VLOG(DEBUG, "%lu, %d, %d", tp.tv_sec, recvpkt->hdr.data_size, recvpkt->hdr.seqno);
-
+            sleep(0.1);
             fseek(fp, recvpkt->hdr.seqno, SEEK_SET);
             fwrite(recvpkt->data, 1, recvpkt->hdr.data_size, fp);
             next = recvpkt->hdr.seqno + recvpkt->hdr.data_size;
             //sorting the packets stored by seqno
             for (int i=0; i<WINDOW_SIZE;i++){
                 if (pile[i]->hdr.seqno==-1) break;
-                for(int j=i;j<WINDOW_SIZE;i++){
+                for(int j=i;j<WINDOW_SIZE;j++){
                     if (pile[j]->hdr.seqno==-1) break;
                     
                     if (pile[j]->hdr.seqno < pile[i]->hdr.seqno){
@@ -172,8 +183,9 @@ int main(int argc, char **argv) {
                 for (int i=0;i<WINDOW_SIZE;i++){
                     if (pile[i]->hdr.seqno==-1){
                         //just in case
-                        memset(pile[i], 0, MSS_SIZE);
+                        //memset(pile[i], 0, MSS_SIZE);
                         memcpy(pile[i], recvpkt, MSS_SIZE);
+                        break;
                     }
                 }
             }
