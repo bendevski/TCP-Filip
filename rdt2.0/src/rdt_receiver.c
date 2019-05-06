@@ -18,7 +18,7 @@
 #include "common.h"
 #include "packet.h"
 
-#define WINDOW_SIZE 10
+#define WINDOW_SIZE 1000
 /*
  * You are required to change the implementation to support
  * window size greater than one.
@@ -38,7 +38,6 @@ int main(int argc, char **argv) {
     FILE *fp;
     char buffer[MSS_SIZE];
     struct timeval tp;
-
     /* 
      * check command line arguments 
      */
@@ -164,7 +163,6 @@ int main(int argc, char **argv) {
                 pile[i]->hdr.data_size = 0;
                 if (pile[i]->hdr.seqno != next) break;
             }
-        
         }
         //if it's not the packet we are expecting
         else if (next < recvpkt->hdr.seqno){
@@ -197,6 +195,7 @@ int main(int argc, char **argv) {
                 (struct sockaddr *) &clientaddr, clientlen) < 0) {
             error("ERROR in sendto");
         }
+        
     }
 
     return 0;

@@ -22,7 +22,56 @@
 
 #define STDIN_FD    0
 #define RETRY  120 //millisecond 
-#define WINDOW_SIZE 10
+#define MAX_WINDOW_SIZE 1000
+
+typedef struct {
+    struct node* next;
+    tcp_packet* pack;
+    int num;
+} node;
+
+node* makeQueue(){
+    node* my = malloc(16);
+    my->next = NULL;
+    my->pack = NULL;
+    my->num = 0;
+}
+void pop(node* head){
+    if (!head->next) return;
+    node* tmp = head->next;
+    node* tmp2 = tmp->next;
+    free(tmp);
+    head->next = tmp2;
+    head->num--;
+}
+void push(node* head, tcp_packet* new){
+    node* x = head;
+    while(x->next!= NULL){
+        x = x->next;
+    }
+    x->next = malloc(10);
+    x = x->next;
+    x->next = NULL;
+    x->pack = new;
+    head->num++;
+}
+int update(node* head, int seqno){
+    int count = 0;
+    node* x = head->next;
+    while (x->pack->hdr.seqno!=seqno){
+        if (x->next==NULL){
+            return count;
+        }
+        count++;
+        pop(head);
+        
+    }
+    return count;
+}
+tcp_packet* get(node*head){
+    node* tmp = head->next;
+    return tmp->pack;
+}
 int next_seqno=0;
 int send_base=0;
 //int window_size = 1;
@@ -33,14 +82,15 @@ struct itimerval timer;
 tcp_packet *sndpkt;
 tcp_packet *recvpkt;
 sigset_t sigmask;       
-tcp_packet *send_window[WINDOW_SIZE];
-
-
-int modincr(int a){
-    if (a+1==WINDOW_SIZE){
-        return 0;
-    }
-    else return a+1;
+tcp_packet *send_window[MAX_WINDOW_SIZE];
+int curWin = 4;
+void end(int sockfd){
+    tcp_packet* sndpkt = make_packet(0);
+    if(sendto(sockfd, sndpkt, TCP_HDR_SIZE + get_data_size(sndpkt), 0, 
+                            ( const struct sockaddr *)&serveraddr, serverlen) < 0)
+                {
+                    error("sendto");
+                }
 }
 
 void resend_packets(int sig)
@@ -97,6 +147,8 @@ int main (int argc, char **argv)
     char *hostname;
     char buffer[DATA_SIZE];
     FILE *fp;
+    FILE *csv_fp;
+
 
     /* check command line arguments */
     if (argc != 4) {
@@ -139,10 +191,19 @@ int main (int argc, char **argv)
     int start = 0;
     int khalas = 0;
     int segger = 0;
+    int dup = 0; //Dup counter
+    int curDup = -1; //current duplicate
+    clock_t cStart = clock();        
+    csv_fp = fopen("CWND.csv", "w");
+    node* head = makeQueue();
+
+
     while (1)
     {
-        
-        sleep(0.1);
+        sleep(0.1); // just to lighten up server load
+        //filling up the window
+        fprintf( csv_fp, "%llu, %i\n", (long long unsigned int)clock(), curWin);
+
         do{
             len = fread(buffer, 1, DATA_SIZE, fp);
             if ( len <= 0 || khalas)
@@ -152,7 +213,8 @@ int main (int argc, char **argv)
                 sndpkt = make_packet(0);
                 sndpkt ->hdr.data_size = 0;
                 sndpkt ->hdr.seqno = -1;
-                send_window[start] = sndpkt;
+                push(head, sndpkt);
+                head->pack = sndpkt;
                 break;
             }
             send_base = next_seqno;
@@ -161,31 +223,33 @@ int main (int argc, char **argv)
             memcpy(sndpkt->data, buffer, len);
             sndpkt->hdr.seqno = send_base;
             send_base+=len;
-            send_window[start] = (tcp_packet*) sndpkt;
+            push(head, (tcp_packet*) sndpkt);
             start++;
-            start%=(WINDOW_SIZE);
-        } while (start != base_index);
+            start%=(curWin);
+        } while (head->num<curWin);
+        tcp_packet* cur = get(head);
+        VLOG(DEBUG, "%d", cur->hdr.seqno);
         //Wait for ACK
         do {
-
-            VLOG(DEBUG, "Sending packet %d to %s", 
-                    send_base, inet_ntoa(serveraddr.sin_addr));
+            // VLOG(DEBUG, "Sending packet %d to %s", 
+            //         send_base, inet_ntoa(serveraddr.sin_addr));
             /*
              * If the sendto is called for the first time, the system will
              * will assign a random port number so that server can send its
              * response to the src port.
              */
-            int i = base_index;
+            //sending everything in the send window
+            node* x = head;
             do {
-
-                if(sendto(sockfd, send_window[i], TCP_HDR_SIZE + get_data_size(send_window[i]), 0, 
+                x = x->next;
+                if(sendto(sockfd, x->pack, TCP_HDR_SIZE + get_data_size(x->pack), 0, 
                             ( const struct sockaddr *)&serveraddr, serverlen) < 0)
                 {
                     error("sendto");
                 }
-                i++;
-                i=i%(WINDOW_SIZE);
-            } while(i!=base_index);
+                
+            } while(x->next!=NULL);
+            
             start_timer();
             //ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
             //struct sockaddr *src_addr, socklen_t *addrlen);
@@ -197,15 +261,43 @@ int main (int argc, char **argv)
             }
 
             recvpkt = (tcp_packet *)buffer;
-            printf("%d \n", get_data_size(recvpkt));
             assert(get_data_size(recvpkt) <= DATA_SIZE);
+            //checking if were getting duplicate acks
+            if (curDup == recvpkt->hdr.ackno){
+                dup++;
+            }
+            else{
+            curDup = recvpkt->hdr.ackno;
+            dup = 0;
+            }
+            //if we hit 4 dups reduce the window size
+            if (dup == 4){
+                dup = 0;
+                if (curWin/2 >= 4) curWin /= 2;
+            }
+            // //timeout checker
+            if (((clock()-cStart)/CLOCKS_PER_SEC) >= 3){
+                if (curWin/2 >= 4) curWin /= 2;
+            }
             stop_timer();
             /*resend pack if don't recv ack */
-        } while(recvpkt->hdr.ackno <= send_window[base_index]->hdr.seqno);
-        start = base_index;
-        while(send_window[base_index]->hdr.seqno != recvpkt->hdr.ackno) {base_index = modincr(base_index); if (start==base_index) return 0;}
+            
+        } while(recvpkt->hdr.ackno <= cur->hdr.seqno);
+        cStart = clock();
+        
+        int x = update(head, recvpkt->hdr.ackno);
+        curWin+=x;
+        
+        if (head->pack){
+            if(sendto(sockfd, get(head), TCP_HDR_SIZE + get_data_size(get(head)), 0, 
+                            ( const struct sockaddr *)&serveraddr, serverlen) < 0)
+                {
+                    error("sendto");
+                }
+            return 0;
+        }
     }
-
+    
     return 0;
 
 }

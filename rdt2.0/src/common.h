@@ -9,7 +9,7 @@ extern int verbose;
 #define INFO    0x1 
 #define DEBUG   0x100
 #define ALL     0x111
-
+#include <time.h>
 #define VLOG(level, ... ) \
     if(level & verbose) { \
         fprintf(stderr, ##__VA_ARGS__ );\
